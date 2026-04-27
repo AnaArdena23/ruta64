@@ -373,7 +373,10 @@ function renderUsers() {
     
     select.innerHTML = '<option value="" disabled selected>Elige un usuario...</option>';
     
-    usuarios.forEach(user => {
+    // Solo mostrar usuarios de equipos activos
+    const usuariosActivos = usuarios.filter(u => EQUIPOS.includes(u.equipo));
+    
+    usuariosActivos.forEach(user => {
         const option = document.createElement('option');
         option.value = user.id;
         option.textContent = `${user.nombre} (${user.equipo})`;
@@ -1478,7 +1481,8 @@ function openAddActivityPanel() {
     // Poblar selector de usuarios si está vacío
     if (userSel.options.length <= 1) {
         // Ordenamos usuarios por nombre
-        const sortedUsers = [...usuarios].sort((a, b) => a.nombre.localeCompare(b.nombre));
+        // Solo mostrar usuarios de equipos activos
+        const sortedUsers = [...usuarios].filter(u => EQUIPOS.includes(u.equipo)).sort((a, b) => a.nombre.localeCompare(b.nombre));
         sortedUsers.forEach(u => {
             const opt = document.createElement('option');
             opt.value = u.id;
