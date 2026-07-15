@@ -129,59 +129,12 @@ function saveMapConfig() {
 /**
  * Publica el mapa (copia borrador a oficial)
  */
-async function publishMap() {
-    showCustomConfirm(
-        'Publicar Mapa Oficial',
-        '¿Estás seguro de que quieres subir estas coordenadas a la base de datos para todos los usuarios?',
-        'Publicar en Supabase',
-        async () => {
-            try {
-                // 1. Clonar y normalizar el borrador
-                const tempConfig = JSON.parse(JSON.stringify(mapConfigDraft));
-                normalizeMapPoints(tempConfig);
-                const puntos = tempConfig.puntos;
-
-                // 2. Validaciones obligatorias (Guardrails)
-                if (!puntos || !Array.isArray(puntos)) {
-                    throw new Error("El borrador no contiene un array de puntos.");
-                }
-                if (puntos.length !== 64) {
-                    throw new Error(`Se requieren exactamente 64 paradas. Actualmente hay ${puntos.length}.`);
-                }
-                
-                for (let i = 0; i < puntos.length; i++) {
-                    const p = puntos[i];
-                    if (p.id !== i + 1) throw new Error(`El punto índice ${i} tiene un ID incorrecto (${p.id}).`);
-                    if (typeof p.x !== 'number' || typeof p.y !== 'number') throw new Error(`Las coordenadas de la parada ${p.id} no son numéricas.`);
-                    if (!p.name || String(p.name).trim() === '') throw new Error(`La parada ${p.id} no tiene nombre.`);
-                    if (!p.description || String(p.description).trim() === '') throw new Error(`La parada ${p.id} no tiene descripción.`);
-                }
-
-                // 3. Escribir en Supabase como única fuente de verdad
-                const { error } = await window.supabase
-                    .from('map_config')
-                    .update({ points_json: puntos })
-                    .eq('id', 'main');
-
-                if (error) throw error;
-
-                // 4. Éxito: Actualizar variables locales y caché secundaria
-                console.log('✅ Coordenadas actualizadas en Supabase:', puntos.length);
-                mapConfig = tempConfig;
-                localStorage.setItem('r64_map_config', JSON.stringify(mapConfig)); // Solo caché pasiva
-                
-                // 5. Refrescar UI visualmente
-                renderMap();
-                showToast('🗺️ Mapa publicado con éxito en la nube');
-                return true;
-
-            } catch (err) {
-                console.error('Error publicando el mapa:', err);
-                showToast(`❌ No se pudo publicar: ${err.message}`);
-                return false; // Mantiene el modal si falla por algún motivo
-            }
-        }
-    );
+function publishMap() {
+    mapConfig = JSON.parse(JSON.stringify(mapConfigDraft));
+    normalizeMapPoints(mapConfig); // Asegurar IDs limpios al publicar
+    localStorage.setItem('r64_map_config', JSON.stringify(mapConfig));
+    renderMap();
+    showToast('Mapa publicado correctamente');
 }
 
 // --- ESTADO DE VISTA ---
@@ -373,10 +326,7 @@ function renderUsers() {
     
     select.innerHTML = '<option value="" disabled selected>Elige un usuario...</option>';
     
-    // Solo mostrar usuarios de equipos activos
-    const usuariosActivos = usuarios.filter(u => EQUIPOS.includes(u.equipo));
-    
-    usuariosActivos.forEach(user => {
+    usuarios.forEach(user => {
         const option = document.createElement('option');
         option.value = user.id;
         option.textContent = `${user.nombre} (${user.equipo})`;
@@ -432,7 +382,7 @@ function getTeamProgress(teamName, week = null) {
     if (miembros.length === 0) return 0;
     
     const idsMiembros = miembros.map(m => m.id);
-    const actsEquipo = actividades.filter(a => idsMiembros.includes(a.userId));
+    const actsEquipo = actividades.filter(a => idsMiembros.includes(Number(a.userId)));
     
     // Función auxiliar para calcular los puntos de una semana específica
     const calcularPuntosSemana = (semanaActs) => {
@@ -699,24 +649,6 @@ function initForm() {
         }
 
         try {
-            // 1. Subir archivo al bucket Evidencias
-            const fileExt = evidenceFile.name.split('.').pop();
-            const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`;
-            
-            const { error: uploadError } = await window.supabase.storage
-                .from('Evidencias')
-                .upload(fileName, evidenceFile);
-
-            if (uploadError) {
-                console.error('Error subiendo evidencia:', uploadError);
-                throw uploadError;
-            }
-
-            // 2. Obtener publicUrl
-            const { data: { publicUrl } } = window.supabase.storage
-                .from('Evidencias')
-                .getPublicUrl(fileName);
-
             // Preparar objeto para Supabase
             const newActivity = {
                 participant_id: userId,
@@ -724,8 +656,7 @@ function initForm() {
                 type: activityType,
                 time_minutes: timeValue,
                 has_evidence: true,
-                evidence_name: evidenceFile.name,
-                evidence_url: publicUrl
+                evidence_name: evidenceFile.name
             };
 
             // Insertar en la tabla activities de Supabase
@@ -837,8 +768,8 @@ function drawTeamMarkers() {
             let parada = null;
             let isStartLine = false;
 
-            if (progress <= 1) {
-                // Progreso 0 y 1 → parada 1 (inicio real de la ruta)
+            if (progress <= 0) {
+                // Si no ha iniciado, usar Parada 1 como referencia pero marcar como salida
                 parada = mapConfig.puntos.find(p => p.id == 1);
                 isStartLine = true;
             } else {
@@ -848,21 +779,17 @@ function drawTeamMarkers() {
             // Si no hay puntos en el mapa, no podemos dibujar nada
             if (!parada) return;
 
-            // Calcular offset para separar markers que comparten parada
+            // Calcular offset si hay solapamiento
             const pointKey = isStartLine ? 'start' : (parada.id || progress);
             const offsetCount = teamsAtPoints[pointKey] || 0;
             teamsAtPoints[pointKey] = offsetCount + 1;
-
-            // Offset en cuadrícula compacta (cluster) para evitar líneas largas
-            const cols = 3;
-            const row = Math.floor(offsetCount / cols);
-            const col = offsetCount % cols;
-            const offsetX = (col * 14) - 14; 
-            const offsetY = (row * 14) - 14;
+            
+            const offsetX = offsetCount * 4;
+            const offsetY = isStartLine ? (offsetCount * 4) + 15 : offsetCount * 4;
 
             const marker = document.createElement('div');
             marker.className = 'team-marker';
-            marker.innerHTML = ''; 
+            marker.innerHTML = ''; // Asegurar que no hay texto ni iconos
             
             if (isStartLine) marker.classList.add('start-line');
             if (selectedTeam && teamName === selectedTeam) {
@@ -1144,7 +1071,7 @@ function renderMapOld() {
 function initAdminMapLogic() {
     const changeBtn = document.getElementById('change-map-image-btn');
     const fileInput = document.getElementById('map-image-input');
-    const adminMapImage = document.getElementById('admin-map-image');
+    const adminImageLayer = document.querySelector('#view-admin-map .map-image-layer');
 
     // El botón de cambio de imagen queda como recordatorio visual en esta fase,
     // pero usamos Test map.png como base fija para evitar saturar localStorage con Base64.
@@ -1161,12 +1088,13 @@ function initAdminMapLogic() {
         };
     }
 
-    // Cargar imagen en Admin
-    if (adminMapImage) {
-        adminMapImage.src = mapConfigDraft.backgroundImage || 'Test map.png';
-        const imageNameEl = document.getElementById('current-image-name');
+    // Cargar imagen fija en Admin
+    if (adminImageLayer) {
+        adminImageLayer.style.backgroundImage = `url("${mapConfigDraft.backgroundImage}")`;
+        adminImageLayer.style.backgroundSize = 'contain';
+          const imageNameEl = document.getElementById('current-image-name');
         if (imageNameEl) {
-            const fileName = mapConfigDraft.backgroundImage ? mapConfigDraft.backgroundImage.split('/').pop() : 'Test map.png';
+            const fileName = mapConfigDraft.backgroundImage.split('/').pop();
             imageNameEl.textContent = `Imagen: ${fileName}`;
         }
     }
@@ -1309,7 +1237,7 @@ async function adminChangeMapImage(file) {
 
     } catch (err) {
         console.error('Error al cambiar imagen del mapa:', err);
-        showToast(`❌ Error: ${err?.message || 'Error desconocido'}`);
+        showToast('❌ Error al subir imagen a Supabase');
     }
 }
 
@@ -1481,8 +1409,7 @@ function openAddActivityPanel() {
     // Poblar selector de usuarios si está vacío
     if (userSel.options.length <= 1) {
         // Ordenamos usuarios por nombre
-        // Solo mostrar usuarios de equipos activos
-        const sortedUsers = [...usuarios].filter(u => EQUIPOS.includes(u.equipo)).sort((a, b) => a.nombre.localeCompare(b.nombre));
+        const sortedUsers = [...usuarios].sort((a, b) => a.nombre.localeCompare(b.nombre));
         sortedUsers.forEach(u => {
             const opt = document.createElement('option');
             opt.value = u.id;
@@ -1555,7 +1482,7 @@ async function addAdminActivity() {
 
     } catch (err) {
         console.error('Error al crear actividad desde Admin:', err);
-        showToast(`❌ Error: ${err?.message || 'Error desconocido'}`);
+        showToast('❌ Error al crear actividad en Supabase');
     }
 }
 
@@ -1642,7 +1569,7 @@ function updateEvidencePreview(url, name) {
             <div class="evidence-file-info" style="text-align: center; padding: 20px; background: #f8fafc; border-radius: 12px; border: 1px dashed #cbd5e1;">
                 <div style="font-size: 28px; margin-bottom: 8px;">📄</div>
                 <p class="small" style="word-break: break-all; color: var(--text-main); font-weight: 600;">${name}</p>
-                <p class="tiny-text" style="color: var(--text-secondary); margin-top: 4px;">Archivo guardado como metadato. No hay preview disponible.</p>
+                <p class="tiny-text" style="color: var(--text-secondary); margin-top: 4px;">Metadatos guardados</p>
             </div>
         `;
         if (removeBtn) removeBtn.style.display = 'block';
@@ -1687,7 +1614,7 @@ function adminDeleteActivity(id) {
 
             } catch (err) {
                 console.error('Error al eliminar actividad:', err);
-                showToast(`❌ Error: ${err?.message || 'Error desconocido'}`);
+                showToast('❌ Error al eliminar de Supabase');
             }
         }
     );
@@ -1731,7 +1658,7 @@ function deleteAllActivitiesAdmin() {
 
                         } catch (err) {
                             console.error('Error al realizar borrado masivo:', err);
-                            showToast(`❌ Error: ${err?.message || 'Error desconocido'}`);
+                            showToast('❌ Error al conectar con Supabase');
                         }
                     } else {
                         showToast('❌ Texto incorrecto. Operación cancelada.');
@@ -1825,7 +1752,7 @@ async function saveActivityChanges() {
 
     } catch (err) {
         console.error('Error al actualizar actividad:', err);
-        showToast(`❌ Error: ${err?.message || 'Error desconocido'}`);
+        showToast('❌ Error al actualizar en Supabase');
     } finally {
         // Reactivar botón
         if (saveBtn) {
@@ -1983,34 +1910,13 @@ function openTeamEditor(teamName = null) {
         nameInput.dataset.originalName = teamName; // Referencia para buscar el ID
         membersEl.textContent = teamMembers.length;
         activitiesEl.textContent = teamActivitiesCount;
-        // Calcular bonus real para la semana más reciente con actividad
-        const semanasEquipo = [...new Set(
-            actividades.filter(a => memberIds.includes(a.userId) && a.semana)
-            .map(a => a.semana)
-        )].sort((a, b) => b - a);
-
-        const semanaMasRecienteConActividad = semanasEquipo[0] || null;
-        let bonusActivo = false;
-        if (teamMembers.length > 0 && semanaMasRecienteConActividad) {
-            const miembrosQueCumplen = teamMembers.filter(m => {
-                return actividades.filter(a => a.userId === m.id && a.semana == semanaMasRecienteConActividad).length >= 2;
-            }).length;
-            bonusActivo = (miembrosQueCumplen === teamMembers.length);
-        }
-        bonusCheck.checked = bonusActivo;
-        bonusCheck.disabled = true; // Siempre solo lectura
+        bonusCheck.checked = false; 
+        bonusCheck.disabled = true;
 
         // Configurar botón guardar cambios
         const saveBtn = panel.querySelector('.admin-actions-vertical .btn-primary');
         if (saveBtn) {
             saveBtn.onclick = () => saveTeamChanges();
-        }
-
-        // Configurar botón eliminar equipo
-        const deleteBtn = panel.querySelector('.admin-actions-vertical .btn-secondary.text-danger');
-        if (deleteBtn) {
-            deleteBtn.onclick = () => adminRemoveTeam(teamName);
-            deleteBtn.style.display = 'block';
         }
 
         // Badge de estado
@@ -2033,8 +1939,8 @@ function openTeamEditor(teamName = null) {
                         </div>
                     </div>
                     <div style="display:flex; gap:5px;">
-                        <button class="btn-icon-small" title="Editar nombre" onclick="adminEditMember('${m.id}', '${teamName}')">✏️</button>
-                        <button class="btn-icon-small text-danger" title="Eliminar integrante" onclick="adminRemoveMember('${m.id}', '${teamName}')">🗑️</button>
+                        <button class="btn-icon-small" title="Editar nombre" onclick="adminEditMember(${m.id}, '${teamName}')">✏️</button>
+                        <button class="btn-icon-small text-danger" title="Eliminar integrante" onclick="adminRemoveMember(${m.id}, '${teamName}')">🗑️</button>
                     </div>
                 </li>
                 `;
@@ -2055,27 +1961,9 @@ function openTeamEditor(teamName = null) {
         membersEl.textContent = "0";
         activitiesEl.textContent = "0";
         bonusCheck.checked = false;
-        membersList.innerHTML = '<li class="small text-secondary" style="padding: 10px;">Guarda el equipo primero para poder añadir integrantes.</li>';
+        membersList.innerHTML = '<li class="small text-secondary" style="padding: 10px;">No hay integrantes aún.</li>';
         statusBadgeContainer.innerHTML = `<span class="status-badge sin-actividad">Sin actividad</span>`;
         
-        // Ocultar botón de añadir integrantes hasta que exista el equipo
-        const addMemberBtn = document.querySelector('.admin-members-section .btn-text-only');
-        if (addMemberBtn) {
-            addMemberBtn.style.display = 'none';
-        }
-
-        // Configurar botón guardar para equipo nuevo
-        const saveBtn = panel.querySelector('.admin-actions-vertical .btn-primary');
-        if (saveBtn) {
-            saveBtn.onclick = () => saveTeamChanges();
-        }
-
-        // Ocultar botón de eliminar equipo para equipos nuevos
-        const deleteBtn = panel.querySelector('.admin-actions-vertical .btn-secondary.text-danger');
-        if (deleteBtn) {
-            deleteBtn.style.display = 'none';
-        }
-
         setTimeout(() => nameInput.focus(), 100);
     }
 
@@ -2126,7 +2014,7 @@ function adminAddMember(teamName) {
 
             } catch (err) {
                 console.error('Error al añadir integrante:', err);
-                showToast(`❌ Error: ${err?.message || 'Fallo de conexión'}`);
+                showToast('❌ Error al conectar con Supabase');
                 return false; // Error, mantener modal abierto para reintentar
             }
         }
@@ -2208,46 +2096,7 @@ function adminRemoveMember(userId, teamName) {
 
             } catch (err) {
                 console.error('Error al desactivar integrante:', err);
-                showToast(`❌ Error: ${err?.message || 'Fallo de conexión'}`);
-            }
-        }
-    );
-}
-
-function adminRemoveTeam(teamName) {
-    const teamId = TEAM_IDS[teamName];
-    if (!teamId) {
-        showToast('❌ Error: No se encontró el ID del equipo en el sistema.');
-        return;
-    }
-
-    showCustomConfirm(
-        'Eliminar equipo',
-        `¿Seguro que quieres eliminar el equipo "${teamName}"? Los integrantes y sus actividades se conservarán, pero el equipo dejará de aparecer en la plataforma.`,
-        'Eliminar',
-        async () => {
-            try {
-                // Borrado lógico en Supabase: desactivamos el equipo
-                const { error } = await window.supabase
-                    .from('teams')
-                    .update({ active: false })
-                    .eq('id', teamId);
-
-                if (error) throw error;
-
-                // Éxito: Sincronizar datos globales y refrescar vistas
-                console.log(`✅ Equipo ${teamId} desactivado en Supabase`);
-                await initSupabaseData();
-                
-                notifyDataChange();
-                closeTeamEditor();
-                renderAdminTeams();
-                
-                showToast(`✅ Equipo eliminado correctamente`);
-
-            } catch (err) {
-                console.error('Error al desactivar equipo:', err);
-                showToast(`❌ Error: ${err?.message || 'Fallo de conexión'}`);
+                showToast('❌ Error al conectar con Supabase');
             }
         }
     );
@@ -2267,10 +2116,15 @@ async function saveTeamChanges() {
 
     const nuevoNombre = nameInput.value.trim();
     const originalName = nameInput.dataset.originalName;
-    const teamId = originalName ? TEAM_IDS[originalName] : null;
+    const teamId = TEAM_IDS[originalName];
 
     if (!nuevoNombre) {
         showToast('⚠️ El nombre del equipo no puede estar vacío');
+        return;
+    }
+
+    if (!teamId) {
+        showToast('❌ Error: ID de equipo no encontrado');
         return;
     }
 
@@ -2281,37 +2135,27 @@ async function saveTeamChanges() {
     }
 
     try {
-        if (teamId) {
-            // Ejecutar UPDATE en Supabase
-            const { error } = await window.supabase
-                .from('teams')
-                .update({ name: nuevoNombre })
-                .eq('id', teamId);
+        // Ejecutar UPDATE en Supabase
+        const { error } = await window.supabase
+            .from('teams')
+            .update({ name: nuevoNombre })
+            .eq('id', teamId);
 
-            if (error) throw error;
-            console.log(`✅ Equipo ${teamId} actualizado a "${nuevoNombre}"`);
-            showToast('✅ Nombre de equipo actualizado');
-        } else {
-            // Ejecutar INSERT en Supabase
-            const { error } = await window.supabase
-                .from('teams')
-                .insert([{ name: nuevoNombre }]);
-
-            if (error) throw error;
-            console.log(`✅ Equipo "${nuevoNombre}" creado en Supabase`);
-            showToast('✅ Equipo creado correctamente');
-        }
+        if (error) throw error;
 
         // Éxito: Sincronizar todo el estado global (Ranking, Mapa, etc.)
+        console.log(`✅ Equipo ${teamId} actualizado a "${nuevoNombre}"`);
         await initSupabaseData();
         
         notifyDataChange();
         renderAdminTeams();
         closeTeamEditor();
+        
+        showToast('✅ Nombre de equipo actualizado');
 
     } catch (err) {
-        console.error('Error al guardar equipo:', err);
-        showToast(`❌ Error: ${err?.message || 'Fallo de conexión'}`);
+        console.error('Error al actualizar equipo:', err);
+        showToast('❌ Error al conectar con Supabase');
     } finally {
         if (saveBtn) {
             saveBtn.disabled = false;
@@ -2794,15 +2638,6 @@ async function initSupabaseData() {
                 if (mapConfigDraft) mapConfigDraft.backgroundImage = mapped.mapBackground;
                 console.log("🗺️ Imagen del mapa cargada desde Supabase:", mapped.mapBackground);
             }
-
-            // Sincronizar puntos desde Supabase
-            if (mapped.mapPoints && Array.isArray(mapped.mapPoints) && mapped.mapPoints.length > 0) {
-                mapConfig.puntos = mapped.mapPoints;
-                if (mapConfigDraft) mapConfigDraft.puntos = JSON.parse(JSON.stringify(mapped.mapPoints));
-                console.log(`📍 Puntos del mapa cargados desde Supabase: ${mapped.mapPoints.length} paradas.`);
-            } else {
-                console.warn("⚠️ No se encontraron puntos válidos en Supabase, usando fallback local.");
-            }
             
             return true;
         }
@@ -2843,23 +2678,13 @@ async function fetchSupabaseData() {
 function mapSupabaseToLocal(sbData) {
     const { teams, participants, activities, map } = sbData;
     
-    let parsedPoints = null;
-    if (map && map.points_json) {
-        try {
-            parsedPoints = typeof map.points_json === 'string' ? JSON.parse(map.points_json) : map.points_json;
-        } catch (e) {
-            console.error("Error parseando points_json de Supabase", e);
-        }
-    }
-
     const result = {
         equipos: [],
         teamColors: {},
         teamIds: {},
         usuarios: [],
         actividades: [],
-        mapBackground: map ? map.background_url : null,
-        mapPoints: parsedPoints
+        mapBackground: map ? map.background_url : null
     };
 
     if (teams) {
@@ -2890,7 +2715,6 @@ function mapSupabaseToLocal(sbData) {
             tiempo: a.time_minutes,
             tieneEvidencia: a.has_evidence,
             evidenciaNombre: a.evidence_name,
-            evidenciaUrl: a.evidence_url,
             fecha: a.created_at,
             createdAt: a.created_at
         }));
