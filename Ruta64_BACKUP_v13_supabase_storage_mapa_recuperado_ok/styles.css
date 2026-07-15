@@ -179,7 +179,7 @@ main {
     align-items: center;
 }
 
-#map-image, #admin-map-image {
+#map-image {
     max-width: 100%;
     max-height: 100%;
     object-fit: contain;
@@ -211,7 +211,6 @@ main {
     background-image: none; /* Se sobreescribe por JS */
     background-size: contain;
     background-repeat: no-repeat;
-    background-position: center;
 }
 
 .map-image-layer.has-image::after {
@@ -596,8 +595,6 @@ main {
 .map-canvas.admin-mode {
     background: #f1f5f9;
     border: 2px dashed #cbd5e1;
-    aspect-ratio: 1 / 1;
-    max-height: 75vh;
 }
 
 .admin-bg {
